@@ -452,7 +452,10 @@ var __movieboxtv = (() => {
           }
           const status = statusOf(res);
           const text = yield readBody(res);
-          return { status, text };
+          let finalUrl = url;
+          if (res && typeof res.url === "string" && res.url)
+            finalUrl = res.url;
+          return { status, text, url: finalUrl };
         });
       }
       function fetchJson(url, init) {
@@ -1035,7 +1038,7 @@ var __movieboxtv = (() => {
   return require_movieboxtv();
 })();
 
-console.log("[MovieBox TV] provider v1.2.0 loaded");
+console.log("[MovieBox TV] provider v1.2.1 loaded");
 if (typeof module !== "undefined" && module.exports) { module.exports = __movieboxtv; }
 if (typeof globalThis !== "undefined") { globalThis.getStreams = __movieboxtv.getStreams; }
 if (typeof global !== "undefined") { global.getStreams = __movieboxtv.getStreams; }

@@ -49,7 +49,9 @@ async function fetchText(url, init) {
     }
     const status = statusOf(res);
     const text = await readBody(res);
-    return { status: status, text: text };
+    let finalUrl = url;
+    if (res && typeof res.url === 'string' && res.url) finalUrl = res.url;
+    return { status: status, text: text, url: finalUrl };
 }
 
 async function fetchJson(url, init) {
