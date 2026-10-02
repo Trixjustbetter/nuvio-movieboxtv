@@ -2,14 +2,14 @@
   "id": "movieboxtv-repo",
   "name": "MovieBox TV",
   "description": "MovieBox TV (com.community.mbox.tv) streaming provider for Nuvio",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "brody",
   "scrapers": [
     {
       "id": "movieboxtv",
       "name": "MovieBox TV",
       "description": "Streams movies and TV shows from the MovieBox TV app",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "supportedTypes": ["movie", "tv"],
       "filename": "providers/movieboxtv.js",
       "enabled": true,

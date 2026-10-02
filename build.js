@@ -23,7 +23,7 @@ esbuild.buildSync({
     sourcemap: false,
     globalName: '__movieboxtv',
     footer: {
-        js: '\nconsole.log("[MovieBox TV] provider v1.1.0 loaded");\n' +
+        js: '\nconsole.log("[MovieBox TV] provider v1.2.0 loaded");\n' +
             'if (typeof module !== "undefined" && module.exports) { module.exports = __movieboxtv; }\n' +
             'if (typeof globalThis !== "undefined") { globalThis.getStreams = __movieboxtv.getStreams; }\n' +
             'if (typeof global !== "undefined") { global.getStreams = __movieboxtv.getStreams; }\n' +

@@ -1,3 +1,5 @@
+const { fetchJson } = require('./http');
+
 const TMDB_API_KEY = 'cd85a9c87eb793d68cbf5b492590e1de';
 
 const cacheStore = {};
@@ -25,11 +27,7 @@ function cacheSweep() {
 }
 
 async function httpGetJson(url) {
-    const res = await fetch(url, {
-        headers: { Accept: 'application/json' },
-    });
-    if (!res.ok) throw new Error('HTTP ' + res.status + ' for ' + url);
-    return res.json();
+    return fetchJson(url, { headers: { Accept: 'application/json' } });
 }
 
 function toMeta(data) {

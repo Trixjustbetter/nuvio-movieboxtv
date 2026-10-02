@@ -386,32 +386,11 @@ var __movieboxtv = (() => {
     }
   });
 
-  // src/movieboxtv/bff.js
-  var require_bff = __commonJS({
-    "src/movieboxtv/bff.js"(exports, module) {
-      var { BASE, HOST_Q, encodeQuery, buildHeaders, b64decode, utf8ToString } = require_sign();
-      var authToken = null;
-      var tokenExpMs = 0;
-      var tokenPromise = null;
-      function b64ToUtf8(b64) {
-        return utf8ToString(b64decode(b64));
-      }
-      function decodeJwtExp(token) {
-        try {
-          const parts = token.split(".");
-          if (parts.length < 2)
-            return 0;
-          let b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
-          while (b64.length % 4)
-            b64 += "=";
-          const payload = JSON.parse(b64ToUtf8(b64));
-          return (payload.exp || 0) * 1e3;
-        } catch (e) {
-          return 0;
-        }
-      }
+  // src/movieboxtv/http.js
+  var require_http = __commonJS({
+    "src/movieboxtv/http.js"(exports, module) {
       function statusOf(res) {
-        if (!res)
+        if (res === null || res === void 0)
           return 0;
         if (typeof res.status === "number")
           return res.status;
@@ -456,6 +435,84 @@ var __movieboxtv = (() => {
           return "";
         });
       }
+      function fetchText(url, init) {
+        return __async(this, null, function* () {
+          if (typeof fetch !== "function") {
+            const e = new Error("fetch is not available in this runtime");
+            e.code = -2;
+            throw e;
+          }
+          let res;
+          try {
+            res = yield fetch(url, init || {});
+          } catch (err) {
+            const e = new Error("network error: " + (err && err.message ? err.message : String(err)));
+            e.code = -3;
+            throw e;
+          }
+          const status = statusOf(res);
+          const text = yield readBody(res);
+          return { status, text };
+        });
+      }
+      function fetchJson(url, init) {
+        return __async(this, null, function* () {
+          const r = yield fetchText(url, init);
+          if (!r.text) {
+            const e = new Error("empty response (HTTP " + r.status + ") for " + url);
+            e.code = r.status;
+            throw e;
+          }
+          let data;
+          try {
+            data = JSON.parse(r.text);
+          } catch (err) {
+            const e = new Error("non-JSON response (HTTP " + r.status + ") for " + url + ": " + String(r.text).slice(0, 120));
+            e.code = r.status;
+            throw e;
+          }
+          if (r.status >= 400) {
+            const msg = data && (data.status_message || data.message) || "HTTP " + r.status;
+            const e = new Error("HTTP " + r.status + " for " + url + ": " + msg);
+            e.code = r.status;
+            throw e;
+          }
+          return data;
+        });
+      }
+      module.exports = { statusOf, readBody, fetchText, fetchJson };
+    }
+  });
+
+  // src/movieboxtv/bff.js
+  var require_bff = __commonJS({
+    "src/movieboxtv/bff.js"(exports, module) {
+      var { BASE, HOST_Q, encodeQuery, buildHeaders, b64decode, utf8ToString } = require_sign();
+      var { fetchText } = require_http();
+      var authToken = null;
+      var tokenExpMs = 0;
+      var tokenPromise = null;
+      var lastCall = "";
+      function b64ToUtf8(b64) {
+        return utf8ToString(b64decode(b64));
+      }
+      function decodeJwtExp(token) {
+        try {
+          const parts = token.split(".");
+          if (parts.length < 2)
+            return 0;
+          let b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+          while (b64.length % 4)
+            b64 += "=";
+          const payload = JSON.parse(b64ToUtf8(b64));
+          return (payload.exp || 0) * 1e3;
+        } catch (e) {
+          return 0;
+        }
+      }
+      function debugInfo() {
+        return "last=" + lastCall + " token=" + (authToken ? "yes" : "no");
+      }
       function call(path, options) {
         return __async(this, null, function* () {
           const opts = options || {};
@@ -472,17 +529,15 @@ var __movieboxtv = (() => {
           const init = { method, headers };
           if (method !== "GET" && method !== "HEAD")
             init.body = body;
-          if (typeof fetch !== "function") {
-            return { code: -2, message: "fetch is not available in this runtime" };
-          }
-          let res;
+          let r;
           try {
-            res = yield fetch(url, init);
+            r = yield fetchText(url, init);
           } catch (e) {
-            return { code: -3, message: "network error: " + (e && e.message ? e.message : String(e)) };
+            lastCall = path + " threw " + (e && e.message ? e.message : String(e));
+            return { code: e && e.code || -3, message: lastCall };
           }
-          const status = statusOf(res);
-          const text = yield readBody(res);
+          const status = r.status;
+          const text = r.text;
           let data = null;
           if (text) {
             try {
@@ -490,10 +545,13 @@ var __movieboxtv = (() => {
             } catch (e) {
               data = { code: -1, message: text.slice(0, 200) };
             }
+          } else {
+            data = { code: -1, message: "empty response (HTTP " + status + ")" };
           }
           if (status >= 400 && data && data.code === void 0) {
             data = { code: status, message: data && data.message || "HTTP " + status };
           }
+          lastCall = path + " http=" + status + " code=" + (data && data.code);
           return data;
         });
       }
@@ -586,7 +644,9 @@ var __movieboxtv = (() => {
         getSubject,
         getPlayInfo,
         getSeasonInfo,
-        _getToken: () => authToken
+        debugInfo,
+        _getToken: () => authToken,
+        _lastCall: () => lastCall
       };
     }
   });
@@ -594,6 +654,7 @@ var __movieboxtv = (() => {
   // src/movieboxtv/tmdb.js
   var require_tmdb = __commonJS({
     "src/movieboxtv/tmdb.js"(exports, module) {
+      var { fetchJson } = require_http();
       var TMDB_API_KEY = "cd85a9c87eb793d68cbf5b492590e1de";
       var cacheStore = {};
       function cacheSet(key, value, ttlMs) {
@@ -611,12 +672,7 @@ var __movieboxtv = (() => {
       }
       function httpGetJson(url) {
         return __async(this, null, function* () {
-          const res = yield fetch(url, {
-            headers: { Accept: "application/json" }
-          });
-          if (!res.ok)
-            throw new Error("HTTP " + res.status + " for " + url);
-          return res.json();
+          return fetchJson(url, { headers: { Accept: "application/json" } });
         });
       }
       function toMeta(data) {
@@ -666,6 +722,21 @@ var __movieboxtv = (() => {
       var bff = require_bff();
       var { getTmdbDetails } = require_tmdb();
       var NAME = "MovieBox TV";
+      var TRACE = [];
+      function tr(msg) {
+        TRACE.push(msg);
+        console.log("[MovieBox TV] " + msg);
+      }
+      function debugRow(msg) {
+        const text = String(msg || "unknown").slice(0, 220);
+        return {
+          title: "MovieBox TV \u2022 " + text,
+          quality: "DEBUG",
+          type: "direct",
+          url: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+          headers: {}
+        };
+      }
       function normalizeTitle(t) {
         return String(t || "").toLowerCase().replace(/&/g, "and").replace(/[^a-z0-9]+/g, "");
       }
@@ -746,11 +817,14 @@ var __movieboxtv = (() => {
           const data = yield bff.search(title, subjectType, 1, 20);
           const items = data && data.items || [];
           let match = matchItem(items, title, year);
+          tr("search1 type=" + subjectType + " hits=" + items.length + " match=" + (match ? match.subjectId : "none"));
           if (match)
             return match;
           const data2 = yield bff.search(title, 0, 1, 20);
           const items2 = data2 && data2.items || [];
-          return matchItem(items2, title, year);
+          match = matchItem(items2, title, year);
+          tr("search2 type=0 hits=" + items2.length + " match=" + (match ? match.subjectId : "none"));
+          return match;
         });
       }
       function qualityRank(q) {
@@ -777,34 +851,6 @@ var __movieboxtv = (() => {
         if (m >= 1)
           return Math.round(m) + " MB";
         return Math.round(n / 1024) + " KB";
-      }
-      function headSize(url) {
-        if (typeof fetch !== "function")
-          return Promise.resolve(0);
-        const probe = new Promise((resolve2) => {
-          const opts = { method: "HEAD", headers: { "User-Agent": "okhttp/4.12.0" } };
-          if (typeof AbortController !== "undefined") {
-            const ctrl = new AbortController();
-            opts.signal = ctrl.signal;
-            setTimeout(() => {
-              try {
-                ctrl.abort();
-              } catch (e) {
-              }
-            }, 1500);
-          }
-          fetch(url, opts).then((r) => {
-            const h = r && r.headers;
-            let len = 0;
-            if (h && typeof h.get === "function")
-              len = Number(h.get("content-length")) || 0;
-            resolve2(len > 0 ? len : 0);
-          }).catch(() => resolve2(0));
-        });
-        return Promise.race([
-          probe,
-          new Promise((resolve2) => setTimeout(() => resolve2(0), 2500))
-        ]);
       }
       function streamKind(url) {
         const u = String(url || "").toLowerCase();
@@ -835,13 +881,6 @@ var __movieboxtv = (() => {
               type: "direct",
               headers: { "User-Agent": "okhttp/4.12.0" }
             });
-          }
-          const sizes = yield Promise.all(out.map((s) => headSize(s.url)));
-          for (let i = 0; i < out.length; i++) {
-            if (sizes[i]) {
-              out[i].bytes = sizes[i];
-              out[i].size = formatBytes(sizes[i]);
-            }
           }
           out.sort((a, b) => qualityRank(a.quality) - qualityRank(b.quality));
           return out;
@@ -934,9 +973,14 @@ var __movieboxtv = (() => {
             if (!hasStreams(playData))
               playData = yield bff.getPlayInfo(subject.subjectId);
           }
+          const resCount = (playData && playData.resources || []).length;
+          const strmCount = (playData && playData.streams || []).length;
+          tr("play id=" + subject.subjectId + " res=" + resCount + " streams=" + strmCount + (playData && playData.code !== void 0 ? " code=" + playData.code : ""));
           const mp4 = yield mapResources(playData);
           const hls = mapHlsStreams(playData);
-          return dedupe(mp4.concat(hls));
+          const list = dedupe(mp4.concat(hls));
+          tr("mapped mp4=" + mp4.length + " hls=" + hls.length + " final=" + list.length);
+          return list;
         });
       }
       function getStreamsByMeta(title, year, mediaType, season, episode) {
@@ -950,21 +994,29 @@ var __movieboxtv = (() => {
       }
       function resolve(tmdbId, mediaType, season, episode) {
         return __async(this, null, function* () {
+          TRACE = [];
           const mt = mediaType === "tv" || mediaType === "series" ? "tv" : "movie";
+          tr("call tmdb=" + tmdbId + " type=" + mt + " s" + season + "e" + episode);
           const meta = yield getTmdbDetails(tmdbId, mt);
           if (!meta || !meta.title) {
             throw new Error("TMDB lookup failed for id " + tmdbId);
           }
+          tr('tmdb "' + meta.title + '" ' + (meta.year || "?"));
           const streams = yield getStreamsByMeta(meta.title, meta.year, mt, season, episode);
-          console.log("[MovieBox TV] " + meta.title + " -> " + streams.length + " stream(s)");
+          tr("done " + streams.length + " stream(s)");
+          if (!streams.length) {
+            return [debugRow("no sources | " + TRACE.join(" > "))];
+          }
           return streams;
         });
       }
       var api = {
         getStreams(tmdbId, mediaType, season, episode) {
           return resolve(tmdbId, mediaType, season, episode).catch((err) => {
-            console.error("[MovieBox TV] Error:", err && err.message ? err.message : err);
-            return [];
+            const msg = err && err.message ? err.message : String(err);
+            console.error("[MovieBox TV] Error:", msg);
+            const extra = typeof bff.debugInfo === "function" ? bff.debugInfo() : "";
+            return [debugRow("error: " + msg + " | " + TRACE.join(" > ") + (extra ? " | " + extra : ""))];
           });
         },
         _internal: {
@@ -983,7 +1035,7 @@ var __movieboxtv = (() => {
   return require_movieboxtv();
 })();
 
-console.log("[MovieBox TV] provider v1.1.0 loaded");
+console.log("[MovieBox TV] provider v1.2.0 loaded");
 if (typeof module !== "undefined" && module.exports) { module.exports = __movieboxtv; }
 if (typeof globalThis !== "undefined") { globalThis.getStreams = __movieboxtv.getStreams; }
 if (typeof global !== "undefined") { global.getStreams = __movieboxtv.getStreams; }

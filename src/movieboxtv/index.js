@@ -3,6 +3,25 @@ const { getTmdbDetails } = require('./tmdb');
 
 const NAME = 'MovieBox TV';
 
+// Step trace: surfaced in the source list when nothing resolves, because the
+// app does not give us its console output.
+let TRACE = [];
+function tr(msg) {
+    TRACE.push(msg);
+    console.log('[MovieBox TV] ' + msg);
+}
+
+function debugRow(msg) {
+    const text = String(msg || 'unknown').slice(0, 220);
+    return {
+        title: 'MovieBox TV • ' + text,
+        quality: 'DEBUG',
+        type: 'direct',
+        url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
+        headers: {},
+    };
+}
+
 function normalizeTitle(t) {
     return String(t || '').toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9]+/g, '');
 }
@@ -73,11 +92,14 @@ async function findSubject(title, year, mediaType) {
     const data = await bff.search(title, subjectType, 1, 20);
     const items = (data && data.items) || [];
     let match = matchItem(items, title, year);
+    tr('search1 type=' + subjectType + ' hits=' + items.length + ' match=' + (match ? match.subjectId : 'none'));
     if (match) return match;
 
     const data2 = await bff.search(title, 0, 1, 20);
     const items2 = (data2 && data2.items) || [];
-    return matchItem(items2, title, year);
+    match = matchItem(items2, title, year);
+    tr('search2 type=0 hits=' + items2.length + ' match=' + (match ? match.subjectId : 'none'));
+    return match;
 }
 
 function qualityRank(q) {
@@ -97,35 +119,6 @@ function formatBytes(n) {
     const m = n / (1024 * 1024);
     if (m >= 1) return Math.round(m) + ' MB';
     return Math.round(n / 1024) + ' KB';
-}
-
-function headSize(url) {
-    if (typeof fetch !== 'function') return Promise.resolve(0);
-
-    const probe = new Promise((resolve) => {
-        const opts = { method: 'HEAD', headers: { 'User-Agent': 'okhttp/4.12.0' } };
-        if (typeof AbortController !== 'undefined') {
-            const ctrl = new AbortController();
-            opts.signal = ctrl.signal;
-            setTimeout(() => {
-                try { ctrl.abort(); } catch (e) { /* noop */ }
-            }, 1500);
-        }
-        fetch(url, opts)
-            .then((r) => {
-                const h = r && r.headers;
-                let len = 0;
-                if (h && typeof h.get === 'function') len = Number(h.get('content-length')) || 0;
-                resolve(len > 0 ? len : 0);
-            })
-            .catch(() => resolve(0));
-    });
-
-    // Never let a stalled probe hold up the whole source list.
-    return Promise.race([
-        probe,
-        new Promise((resolve) => setTimeout(() => resolve(0), 2500)),
-    ]);
 }
 
 function streamKind(url) {
@@ -155,13 +148,6 @@ async function mapResources(playData) {
         });
     }
 
-    const sizes = await Promise.all(out.map((s) => headSize(s.url)));
-    for (let i = 0; i < out.length; i++) {
-        if (sizes[i]) {
-            out[i].bytes = sizes[i];
-            out[i].size = formatBytes(sizes[i]);
-        }
-    }
     out.sort((a, b) => qualityRank(a.quality) - qualityRank(b.quality));
     return out;
 }
@@ -253,9 +239,16 @@ async function getStreamsForSubject(subject, mediaType, season, episode) {
         if (!hasStreams(playData)) playData = await bff.getPlayInfo(subject.subjectId);
     }
 
+    const resCount = ((playData && playData.resources) || []).length;
+    const strmCount = ((playData && playData.streams) || []).length;
+    tr('play id=' + subject.subjectId + ' res=' + resCount + ' streams=' + strmCount +
+        (playData && playData.code !== undefined ? ' code=' + playData.code : ''));
+
     const mp4 = await mapResources(playData);
     const hls = mapHlsStreams(playData);
-    return dedupe(mp4.concat(hls));
+    const list = dedupe(mp4.concat(hls));
+    tr('mapped mp4=' + mp4.length + ' hls=' + hls.length + ' final=' + list.length);
+    return list;
 }
 
 async function getStreamsByMeta(title, year, mediaType, season, episode) {
@@ -267,21 +260,29 @@ async function getStreamsByMeta(title, year, mediaType, season, episode) {
 }
 
 async function resolve(tmdbId, mediaType, season, episode) {
+    TRACE = [];
     const mt = mediaType === 'tv' || mediaType === 'series' ? 'tv' : 'movie';
+    tr('call tmdb=' + tmdbId + ' type=' + mt + ' s' + season + 'e' + episode);
     const meta = await getTmdbDetails(tmdbId, mt);
     if (!meta || !meta.title) {
         throw new Error('TMDB lookup failed for id ' + tmdbId);
     }
+    tr('tmdb "' + meta.title + '" ' + (meta.year || '?'));
     const streams = await getStreamsByMeta(meta.title, meta.year, mt, season, episode);
-    console.log('[MovieBox TV] ' + meta.title + ' -> ' + streams.length + ' stream(s)');
+    tr('done ' + streams.length + ' stream(s)');
+    if (!streams.length) {
+        return [debugRow('no sources | ' + TRACE.join(' > '))];
+    }
     return streams;
 }
 
 const api = {
     getStreams(tmdbId, mediaType, season, episode) {
         return resolve(tmdbId, mediaType, season, episode).catch((err) => {
-            console.error('[MovieBox TV] Error:', err && err.message ? err.message : err);
-            return [];
+            const msg = err && err.message ? err.message : String(err);
+            console.error('[MovieBox TV] Error:', msg);
+            const extra = typeof bff.debugInfo === 'function' ? bff.debugInfo() : '';
+            return [debugRow('error: ' + msg + ' | ' + TRACE.join(' > ') + (extra ? ' | ' + extra : ''))];
         });
     },
     _internal: {
