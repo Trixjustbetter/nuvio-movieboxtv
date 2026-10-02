@@ -40,9 +40,53 @@ function b64encode(bytes) {
 }
 
 function utf8Bytes(str) {
-    const s = unescape(encodeURIComponent(String(str)));
+    const s = String(str);
     const out = [];
-    for (let i = 0; i < s.length; i++) out.push(s.charCodeAt(i) & 0xff);
+    for (let i = 0; i < s.length; i++) {
+        let c = s.charCodeAt(i);
+        if (c < 0x80) {
+            out.push(c);
+        } else if (c < 0x800) {
+            out.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f));
+        } else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length) {
+            const c2 = s.charCodeAt(++i);
+            const cp = 0x10000 + ((c - 0xd800) << 10) + (c2 - 0xdc00);
+            out.push(
+                0xf0 | (cp >> 18),
+                0x80 | ((cp >> 12) & 0x3f),
+                0x80 | ((cp >> 6) & 0x3f),
+                0x80 | (cp & 0x3f)
+            );
+        } else {
+            out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
+        }
+    }
+    return out;
+}
+
+function utf8ToString(bytes) {
+    let out = '';
+    let i = 0;
+    while (i < bytes.length) {
+        const b = bytes[i++];
+        let cp;
+        if (b < 0x80) {
+            out += String.fromCharCode(b);
+            continue;
+        } else if (b < 0xe0) {
+            cp = ((b & 0x1f) << 6) | (bytes[i++] & 0x3f);
+        } else if (b < 0xf0) {
+            cp = ((b & 0x0f) << 12) | ((bytes[i++] & 0x3f) << 6) | (bytes[i++] & 0x3f);
+        } else {
+            cp = ((b & 0x07) << 18) | ((bytes[i++] & 0x3f) << 12) | ((bytes[i++] & 0x3f) << 6) | (bytes[i++] & 0x3f);
+        }
+        if (cp > 0xffff) {
+            cp -= 0x10000;
+            out += String.fromCharCode(0xd800 + (cp >> 10), 0xdc00 + (cp & 0x3ff));
+        } else {
+            out += String.fromCharCode(cp);
+        }
+    }
     return out;
 }
 
@@ -305,4 +349,6 @@ module.exports = {
     hmacMd5,
     b64encode,
     b64decode,
+    utf8Bytes,
+    utf8ToString,
 };

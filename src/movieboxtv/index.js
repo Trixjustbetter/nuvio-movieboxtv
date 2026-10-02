@@ -100,27 +100,32 @@ function formatBytes(n) {
 }
 
 function headSize(url) {
-    return new Promise((resolve) => {
-        const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
-        const timer = setTimeout(() => {
-            if (ctrl) {
-                try { ctrl.abort(); } catch (e) { /* noop */ }
-            }
-            resolve(0);
-        }, 1500);
+    if (typeof fetch !== 'function') return Promise.resolve(0);
+
+    const probe = new Promise((resolve) => {
         const opts = { method: 'HEAD', headers: { 'User-Agent': 'okhttp/4.12.0' } };
-        if (ctrl) opts.signal = ctrl.signal;
+        if (typeof AbortController !== 'undefined') {
+            const ctrl = new AbortController();
+            opts.signal = ctrl.signal;
+            setTimeout(() => {
+                try { ctrl.abort(); } catch (e) { /* noop */ }
+            }, 1500);
+        }
         fetch(url, opts)
             .then((r) => {
-                clearTimeout(timer);
-                const n = Number((r.headers && r.headers.get('content-length')) || 0);
-                resolve(n > 0 ? n : 0);
+                const h = r && r.headers;
+                let len = 0;
+                if (h && typeof h.get === 'function') len = Number(h.get('content-length')) || 0;
+                resolve(len > 0 ? len : 0);
             })
-            .catch(() => {
-                clearTimeout(timer);
-                resolve(0);
-            });
+            .catch(() => resolve(0));
     });
+
+    // Never let a stalled probe hold up the whole source list.
+    return Promise.race([
+        probe,
+        new Promise((resolve) => setTimeout(() => resolve(0), 2500)),
+    ]);
 }
 
 function streamKind(url) {
@@ -142,7 +147,6 @@ async function mapResources(playData) {
         const res = r.resolution || '';
         const quality = res ? (/^\d+$/.test(res) ? res + 'p' : res) : 'Auto';
         out.push({
-            name: NAME,
             title: quality + (r.codec ? ' ' + r.codec : ''),
             url: r.url,
             quality: quality,
@@ -176,7 +180,6 @@ function mapHlsStreams(playData) {
         const quality = resolutions ? resolutions + 'p' : (s.format || 'HLS');
         const bytes = /^\d+$/.test(String(s.size || '')) ? Number(s.size) : 0;
         out.push({
-            name: NAME,
             title: quality + (s.codecName ? ' ' + s.codecName : '') + ' HLS',
             url: s.url,
             quality: quality,
@@ -203,6 +206,13 @@ function dedupe(list) {
         out.push(s);
     }
     out.sort((a, b) => qualityRank(a.quality) - qualityRank(b.quality));
+    // Nuvio labels rows with `name || title` and sorts alphabetically by that
+    // label, so a numeric prefix keeps the quality order intact.
+    for (let i = 0; i < out.length; i++) {
+        const n = i + 1;
+        out[i].title = (n < 10 ? '0' + n : String(n)) + '. ' + out[i].title;
+        if (out[i].size) out[i].title += ' • ' + out[i].size;
+    }
     return out;
 }
 

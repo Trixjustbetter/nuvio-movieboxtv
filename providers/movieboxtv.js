@@ -68,10 +68,52 @@ var __movieboxtv = (() => {
         return out;
       }
       function utf8Bytes(str) {
-        const s = unescape(encodeURIComponent(String(str)));
+        const s = String(str);
         const out = [];
-        for (let i = 0; i < s.length; i++)
-          out.push(s.charCodeAt(i) & 255);
+        for (let i = 0; i < s.length; i++) {
+          let c = s.charCodeAt(i);
+          if (c < 128) {
+            out.push(c);
+          } else if (c < 2048) {
+            out.push(192 | c >> 6, 128 | c & 63);
+          } else if (c >= 55296 && c <= 56319 && i + 1 < s.length) {
+            const c2 = s.charCodeAt(++i);
+            const cp = 65536 + (c - 55296 << 10) + (c2 - 56320);
+            out.push(
+              240 | cp >> 18,
+              128 | cp >> 12 & 63,
+              128 | cp >> 6 & 63,
+              128 | cp & 63
+            );
+          } else {
+            out.push(224 | c >> 12, 128 | c >> 6 & 63, 128 | c & 63);
+          }
+        }
+        return out;
+      }
+      function utf8ToString(bytes) {
+        let out = "";
+        let i = 0;
+        while (i < bytes.length) {
+          const b = bytes[i++];
+          let cp;
+          if (b < 128) {
+            out += String.fromCharCode(b);
+            continue;
+          } else if (b < 224) {
+            cp = (b & 31) << 6 | bytes[i++] & 63;
+          } else if (b < 240) {
+            cp = (b & 15) << 12 | (bytes[i++] & 63) << 6 | bytes[i++] & 63;
+          } else {
+            cp = (b & 7) << 18 | (bytes[i++] & 63) << 12 | (bytes[i++] & 63) << 6 | bytes[i++] & 63;
+          }
+          if (cp > 65535) {
+            cp -= 65536;
+            out += String.fromCharCode(55296 + (cp >> 10), 56320 + (cp & 1023));
+          } else {
+            out += String.fromCharCode(cp);
+          }
+        }
         return out;
       }
       function md5(input) {
@@ -337,7 +379,9 @@ var __movieboxtv = (() => {
         md5,
         hmacMd5,
         b64encode,
-        b64decode
+        b64decode,
+        utf8Bytes,
+        utf8ToString
       };
     }
   });
@@ -345,20 +389,12 @@ var __movieboxtv = (() => {
   // src/movieboxtv/bff.js
   var require_bff = __commonJS({
     "src/movieboxtv/bff.js"(exports, module) {
-      var { BASE, HOST_Q, encodeQuery, buildHeaders, b64decode } = require_sign();
+      var { BASE, HOST_Q, encodeQuery, buildHeaders, b64decode, utf8ToString } = require_sign();
       var authToken = null;
       var tokenExpMs = 0;
       var tokenPromise = null;
       function b64ToUtf8(b64) {
-        const bytes = b64decode(b64);
-        let s = "";
-        for (let i = 0; i < bytes.length; i++)
-          s += String.fromCharCode(bytes[i]);
-        try {
-          return decodeURIComponent(escape(s));
-        } catch (e) {
-          return s;
-        }
+        return utf8ToString(b64decode(b64));
       }
       function decodeJwtExp(token) {
         try {
@@ -373,6 +409,52 @@ var __movieboxtv = (() => {
         } catch (e) {
           return 0;
         }
+      }
+      function statusOf(res) {
+        if (!res)
+          return 0;
+        if (typeof res.status === "number")
+          return res.status;
+        if (typeof res.statusCode === "number")
+          return res.statusCode;
+        if (res.ok === false)
+          return 500;
+        return 200;
+      }
+      function readBody(res) {
+        return __async(this, null, function* () {
+          if (res === null || res === void 0)
+            return "";
+          if (typeof res === "string")
+            return res;
+          if (typeof res.text === "function") {
+            try {
+              const t = yield res.text();
+              if (typeof t === "string")
+                return t;
+            } catch (e) {
+            }
+          }
+          if (typeof res.json === "function") {
+            try {
+              const j = yield res.json();
+              if (j !== void 0 && j !== null)
+                return JSON.stringify(j);
+            } catch (e) {
+            }
+          }
+          if (typeof res._bodyText === "string")
+            return res._bodyText;
+          if (typeof res.body === "string")
+            return res.body;
+          if (res.body && typeof res.body === "object") {
+            try {
+              return JSON.stringify(res.body);
+            } catch (e) {
+            }
+          }
+          return "";
+        });
       }
       function call(path, options) {
         return __async(this, null, function* () {
@@ -390,9 +472,18 @@ var __movieboxtv = (() => {
           const init = { method, headers };
           if (method !== "GET" && method !== "HEAD")
             init.body = body;
-          const res = yield fetch(url, init);
+          if (typeof fetch !== "function") {
+            return { code: -2, message: "fetch is not available in this runtime" };
+          }
+          let res;
+          try {
+            res = yield fetch(url, init);
+          } catch (e) {
+            return { code: -3, message: "network error: " + (e && e.message ? e.message : String(e)) };
+          }
+          const status = statusOf(res);
+          const text = yield readBody(res);
           let data = null;
-          const text = yield res.text();
           if (text) {
             try {
               data = JSON.parse(text);
@@ -400,8 +491,8 @@ var __movieboxtv = (() => {
               data = { code: -1, message: text.slice(0, 200) };
             }
           }
-          if (!res.ok && data && data.code === void 0) {
-            data = { code: res.status, message: data && data.message || "HTTP " + res.status };
+          if (status >= 400 && data && data.code === void 0) {
+            data = { code: status, message: data && data.message || "HTTP " + status };
           }
           return data;
         });
@@ -518,13 +609,6 @@ var __movieboxtv = (() => {
         }
         return e.v;
       }
-      setInterval(() => {
-        const now = Date.now();
-        for (const k of Object.keys(cacheStore)) {
-          if (cacheStore[k].exp < now)
-            delete cacheStore[k];
-        }
-      }, 60 * 1e3).unref();
       function httpGetJson(url) {
         return __async(this, null, function* () {
           const res = yield fetch(url, {
@@ -695,29 +779,32 @@ var __movieboxtv = (() => {
         return Math.round(n / 1024) + " KB";
       }
       function headSize(url) {
-        return new Promise((resolve2) => {
-          const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
-          const timer = setTimeout(() => {
-            if (ctrl) {
+        if (typeof fetch !== "function")
+          return Promise.resolve(0);
+        const probe = new Promise((resolve2) => {
+          const opts = { method: "HEAD", headers: { "User-Agent": "okhttp/4.12.0" } };
+          if (typeof AbortController !== "undefined") {
+            const ctrl = new AbortController();
+            opts.signal = ctrl.signal;
+            setTimeout(() => {
               try {
                 ctrl.abort();
               } catch (e) {
               }
-            }
-            resolve2(0);
-          }, 1500);
-          const opts = { method: "HEAD", headers: { "User-Agent": "okhttp/4.12.0" } };
-          if (ctrl)
-            opts.signal = ctrl.signal;
+            }, 1500);
+          }
           fetch(url, opts).then((r) => {
-            clearTimeout(timer);
-            const n = Number(r.headers && r.headers.get("content-length") || 0);
-            resolve2(n > 0 ? n : 0);
-          }).catch(() => {
-            clearTimeout(timer);
-            resolve2(0);
-          });
+            const h = r && r.headers;
+            let len = 0;
+            if (h && typeof h.get === "function")
+              len = Number(h.get("content-length")) || 0;
+            resolve2(len > 0 ? len : 0);
+          }).catch(() => resolve2(0));
         });
+        return Promise.race([
+          probe,
+          new Promise((resolve2) => setTimeout(() => resolve2(0), 2500))
+        ]);
       }
       function streamKind(url) {
         const u = String(url || "").toLowerCase();
@@ -742,7 +829,6 @@ var __movieboxtv = (() => {
             const res = r.resolution || "";
             const quality = res ? /^\d+$/.test(res) ? res + "p" : res : "Auto";
             out.push({
-              name: NAME,
               title: quality + (r.codec ? " " + r.codec : ""),
               url: r.url,
               quality,
@@ -778,7 +864,6 @@ var __movieboxtv = (() => {
           const quality = resolutions ? resolutions + "p" : s.format || "HLS";
           const bytes = /^\d+$/.test(String(s.size || "")) ? Number(s.size) : 0;
           out.push({
-            name: NAME,
             title: quality + (s.codecName ? " " + s.codecName : "") + " HLS",
             url: s.url,
             quality,
@@ -805,6 +890,12 @@ var __movieboxtv = (() => {
           out.push(s);
         }
         out.sort((a, b) => qualityRank(a.quality) - qualityRank(b.quality));
+        for (let i = 0; i < out.length; i++) {
+          const n = i + 1;
+          out[i].title = (n < 10 ? "0" + n : String(n)) + ". " + out[i].title;
+          if (out[i].size)
+            out[i].title += " \u2022 " + out[i].size;
+        }
         return out;
       }
       function hasStreams(playData) {
@@ -892,6 +983,7 @@ var __movieboxtv = (() => {
   return require_movieboxtv();
 })();
 
+console.log("[MovieBox TV] provider v1.1.0 loaded");
 if (typeof module !== "undefined" && module.exports) { module.exports = __movieboxtv; }
 if (typeof globalThis !== "undefined") { globalThis.getStreams = __movieboxtv.getStreams; }
 if (typeof global !== "undefined") { global.getStreams = __movieboxtv.getStreams; }

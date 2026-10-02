@@ -16,12 +16,13 @@ function cacheGet(key) {
     return e.v;
 }
 
-setInterval(() => {
+// Sweep expired entries on demand — the app's JS runtime has no Node timers.
+function cacheSweep() {
     const now = Date.now();
     for (const k of Object.keys(cacheStore)) {
         if (cacheStore[k].exp < now) delete cacheStore[k];
     }
-}, 60 * 1000).unref();
+}
 
 async function httpGetJson(url) {
     const res = await fetch(url, {

@@ -1,18 +1,11 @@
-const { BASE, HOST_Q, encodeQuery, buildHeaders, b64decode } = require('./sign');
+const { BASE, HOST_Q, encodeQuery, buildHeaders, b64decode, utf8ToString } = require('./sign');
 
 let authToken = null;
 let tokenExpMs = 0;
 let tokenPromise = null;
 
 function b64ToUtf8(b64) {
-    const bytes = b64decode(b64);
-    let s = '';
-    for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
-    try {
-        return decodeURIComponent(escape(s));
-    } catch (e) {
-        return s;
-    }
+    return utf8ToString(b64decode(b64));
 }
 
 function decodeJwtExp(token) {
@@ -26,6 +19,39 @@ function decodeJwtExp(token) {
     } catch (e) {
         return 0;
     }
+}
+
+function statusOf(res) {
+    if (!res) return 0;
+    if (typeof res.status === 'number') return res.status;
+    if (typeof res.statusCode === 'number') return res.statusCode;
+    if (res.ok === false) return 500;
+    return 200;
+}
+
+// The in-app fetch shim is not a plain browser fetch: some builds hand back
+// { body }, { _bodyText } or a bare string instead of a Response.
+async function readBody(res) {
+    if (res === null || res === undefined) return '';
+    if (typeof res === 'string') return res;
+    if (typeof res.text === 'function') {
+        try {
+            const t = await res.text();
+            if (typeof t === 'string') return t;
+        } catch (e) { /* fall through */ }
+    }
+    if (typeof res.json === 'function') {
+        try {
+            const j = await res.json();
+            if (j !== undefined && j !== null) return JSON.stringify(j);
+        } catch (e) { /* fall through */ }
+    }
+    if (typeof res._bodyText === 'string') return res._bodyText;
+    if (typeof res.body === 'string') return res.body;
+    if (res.body && typeof res.body === 'object') {
+        try { return JSON.stringify(res.body); } catch (e) { /* noop */ }
+    }
+    return '';
 }
 
 async function call(path, options) {
@@ -45,9 +71,20 @@ async function call(path, options) {
     const init = { method, headers };
     if (method !== 'GET' && method !== 'HEAD') init.body = body;
 
-    const res = await fetch(url, init);
+    if (typeof fetch !== 'function') {
+        return { code: -2, message: 'fetch is not available in this runtime' };
+    }
+
+    let res;
+    try {
+        res = await fetch(url, init);
+    } catch (e) {
+        return { code: -3, message: 'network error: ' + (e && e.message ? e.message : String(e)) };
+    }
+
+    const status = statusOf(res);
+    const text = await readBody(res);
     let data = null;
-    const text = await res.text();
     if (text) {
         try {
             data = JSON.parse(text);
@@ -55,8 +92,8 @@ async function call(path, options) {
             data = { code: -1, message: text.slice(0, 200) };
         }
     }
-    if (!res.ok && data && data.code === undefined) {
-        data = { code: res.status, message: (data && data.message) || ('HTTP ' + res.status) };
+    if (status >= 400 && data && data.code === undefined) {
+        data = { code: status, message: (data && data.message) || ('HTTP ' + status) };
     }
     return data;
 }
