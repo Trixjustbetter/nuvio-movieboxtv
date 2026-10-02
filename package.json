@@ -1,6 +1,6 @@
 {
   "name": "nuvio-movieboxtv",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "Nuvio providers: MovieBox TV and 4KHDHub",
   "main": "providers/movieboxtv.js",
   "scripts": {

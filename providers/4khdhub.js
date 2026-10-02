@@ -304,13 +304,14 @@ var __4khdhub = (() => {
         const r2 = [];
         const link = [];
         const ext = [];
-        const worker = [];
         const seen = {};
         for (let i = 0; i < all.length; i++) {
           const u = all[i];
           if (!u || seen[u])
             continue;
           seen[u] = true;
+          if (/workers\.dev/i.test(u))
+            continue;
           if (/r2\.cloudflarestorage\.com/.test(u)) {
             r2.push(u);
             continue;
@@ -324,27 +325,25 @@ var __4khdhub = (() => {
             ext.push(u);
             continue;
           }
-          if (/workers\.dev\/[0-9a-f]{32,}(\?|$)/i.test(u))
-            worker.push(u);
         }
-        return r2.concat(link, ext, worker);
+        return r2.concat(ext, link);
       }
-      function pickDirectUrl(anchors, finalUrl) {
-        const list = directCandidates(anchors, finalUrl);
-        return list.length ? list[0] : null;
+      function isGoogleFile(url) {
+        return /googleusercontent\.com/i.test(String(url || ""));
       }
       function looksPlayable(url) {
         return __async(this, null, function* () {
           if (typeof fetch !== "function")
             return true;
+          const google = isGoogleFile(url);
           let res;
           try {
-            res = yield fetch(url, { headers: { "User-Agent": UA, Range: "bytes=0-63", Referer: REFERER } });
+            res = google ? yield fetch(url, { method: "HEAD", headers: { "User-Agent": UA, Referer: REFERER } }) : yield fetch(url, { headers: { "User-Agent": UA, Range: "bytes=0-", Referer: REFERER } });
           } catch (e) {
             return false;
           }
           const status = statusOf(res);
-          if (status >= 400)
+          if (status < 200 || status >= 400)
             return false;
           let ct = "";
           try {
@@ -355,21 +354,21 @@ var __4khdhub = (() => {
           }
           if (ct && /(json|text\/html)/i.test(ct))
             return false;
+          if (google)
+            return true;
           try {
-            if (res.body && typeof res.body.getReader === "function") {
-              const reader = res.body.getReader();
-              const chunk = yield reader.read();
-              try {
-                yield reader.cancel();
-              } catch (e) {
-              }
-              const v = chunk && chunk.value;
-              if (v && v.length >= 4) {
-                const ebml = v[0] === 26 && v[1] === 69 && v[2] === 223 && v[3] === 163;
-                const mp4 = v[4] === 102 && v[5] === 116 && v[6] === 121 && v[7] === 112;
-                const ctOk = /video|octet-stream|matroska/i.test(ct);
-                if (!ebml && !mp4 && !ctOk)
-                  return false;
+            if (res.body) {
+              if (typeof res.body.cancel === "function") {
+                const p = res.body.cancel();
+                if (p && typeof p.catch === "function")
+                  p.catch(function() {
+                  });
+              } else if (typeof res.body.getReader === "function") {
+                const rd = res.body.getReader();
+                const c = rd.cancel();
+                if (c && typeof c.catch === "function")
+                  c.catch(function() {
+                  });
               }
             }
           } catch (e) {
@@ -381,12 +380,10 @@ var __4khdhub = (() => {
         return __async(this, null, function* () {
           for (let i = 0; i < candidates.length; i++) {
             const c = candidates[i];
-            if (/workers\.dev/.test(c)) {
-              const ok = yield looksPlayable(c);
-              if (!ok) {
-                console.log("[4KHDHub] skipping dead worker blob");
-                continue;
-              }
+            const ok = yield looksPlayable(c);
+            if (!ok) {
+              console.log("[4KHDHub] skipping unplayable link");
+              continue;
             }
             return c;
           }
@@ -436,7 +433,7 @@ var __4khdhub = (() => {
         return __async(this, null, function* () {
           const page = yield getHtml(url, "https://4khdhub.one/");
           const anchors = collectAnchors(page.text);
-          const selfDirect = pickDirectUrl(anchors, page.url);
+          const selfDirect = yield firstPlayable(directCandidates(anchors, page.url));
           if (selfDirect && selfDirect !== page.url)
             return selfDirect;
           const api = decodeApiUrl(page.text);
@@ -464,10 +461,13 @@ var __4khdhub = (() => {
             throw new Error("empty target");
           if (hops > 4)
             throw new Error("too many hops for " + shortUrl(target));
-          if (/\.(mkv|mp4|m4v|avi)(\?|$)/i.test(target) && !/gpdl\./.test(target))
-            return target;
+          if (/\.(mkv|mp4|m4v|avi)(\?|$)/i.test(target) && !/gpdl\./.test(target) && !/workers\.dev/i.test(target)) {
+            if (yield looksPlayable(target))
+              return target;
+            console.log("[4KHDHub] skipping unplayable file link");
+          }
           const page = yield getHtml(target, "https://4khdhub.one/");
-          const direct = pickDirectUrl(collectAnchors(page.text), page.url);
+          const direct = yield firstPlayable(directCandidates(collectAnchors(page.text), page.url));
           if (direct && /\.cloudflarestorage\.com/.test(direct))
             return direct;
           if (isHubdriveFile(target)) {
@@ -494,7 +494,7 @@ var __4khdhub = (() => {
           const page = yield getHtml(shortLink, "https://4khdhub.one/");
           const target = decodeShortLink(page.text);
           if (!target) {
-            const direct = pickDirectUrl(collectAnchors(page.text), page.url);
+            const direct = yield firstPlayable(directCandidates(collectAnchors(page.text), page.url));
             if (direct)
               return direct;
             throw new Error("no payload in " + shortUrl(shortLink));
@@ -745,23 +745,22 @@ var __4khdhub = (() => {
           const strong = cards.filter(function(c) {
             return c.score >= 95;
           });
-          const candidates = (strong.length ? strong : cards).slice(0, strong.length ? 1 : 3);
-          let fallback = null;
+          const rest = cards.filter(function(c) {
+            return strong.indexOf(c) === -1;
+          });
+          const candidates = strong.concat(rest).slice(0, 3);
           for (let i = 0; i < candidates.length; i++) {
             const post = yield fetchPost(candidates[i].url);
             log('post "' + post.title + '" (' + (post.year || "?") + ") items=" + post.items.length);
             if (!post.items.length)
               continue;
-            if (!fallback)
-              fallback = post;
-            if (!year || !post.year || Math.abs(post.year - year) <= 1)
+            const diff = year && post.year ? Math.abs(post.year - year) : 0;
+            const sameTitle = normalize(post.title) === normalize(title);
+            if (!year || !post.year || diff <= 1 || sameTitle && diff <= 3)
               return post;
-            if (Math.abs(post.year - year) <= 3 && i === candidates.length - 1)
-              return post;
+            log("year " + post.year + " is not " + year + ", trying next candidate");
           }
-          if (fallback)
-            return fallback;
-          throw new Error('no downloadable item on "' + title + '"');
+          throw new Error('no "' + title + '" (' + (year || "?") + ") on 4khdhub");
         });
       }
       module.exports = {
@@ -957,7 +956,7 @@ var __4khdhub = (() => {
   return require_khdhub();
 })();
 
-console.log("[4KHDHub] provider v1.0.0 loaded");
+console.log("[4KHDHub] provider v1.0.1 loaded");
 if (typeof module !== "undefined" && module.exports) { module.exports = __4khdhub; }
 if (typeof globalThis !== "undefined") { globalThis.getStreams = __4khdhub.getStreams; }
 if (typeof global !== "undefined") { global.getStreams = __4khdhub.getStreams; }

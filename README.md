@@ -21,12 +21,22 @@ Scraper for `https://4khdhub.one/` (movies + series). Flow per title:
 TMDB → /?s=<title> → post page (file-title / episode-file-title blocks)
      → greenmotors.club/?id=…   (b64(b64(x)) → rot13 → b64 → JSON.o → b64)
      → hubcloud.ist/drive/<id>  (var url = …hubcloud.php?…)
-     → signed direct .mkv  (r2.cloudflarestorage / worker blob / googleusercontent)
+     → direct .mkv  (signed r2.cloudflarestorage / CDN file / googleusercontent)
 ```
 
 Series posts are filtered to the requested `SxxEyy` before resolving; mirrors
-(HubCloud then HubDrive) are tried in order and dead worker blobs are probed
-and skipped.
+(HubCloud then HubDrive) are tried in order, and candidates are offered in
+seek-first order: R2, CDN, then the Google download link. Every link is
+checked with the same open-ended `Range: bytes=0-` request a player sends, so
+a URL that would 403 in Nuvio is dropped here instead of failing to open.
+Cloudflare worker blobs are skipped outright — they reject that request with
+a JSON 403 while serving bounded ranges. A post whose release year disagrees
+with TMDB is rejected rather than playing the wrong film.
+
+**Seeking:** R2/CDN rows answer Range requests, so scrubbing works. The
+`video-downloads.googleusercontent.com` rows play but ignore Range (the host
+returns the whole file for any range), so the player cannot fast-forward
+inside them — that is a host limit, not something the plugin can change.
 
 ## Layout
 

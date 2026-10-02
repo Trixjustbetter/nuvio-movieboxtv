@@ -190,19 +190,21 @@ async function findPost(title, year, mediaType, log) {
     cards.sort(function (a, b) { return b.score - a.score; });
 
     const strong = cards.filter(function (c) { return c.score >= 95; });
-    const candidates = (strong.length ? strong : cards).slice(0, strong.length ? 1 : 3);
+    const rest = cards.filter(function (c) { return strong.indexOf(c) === -1; });
+    const candidates = strong.concat(rest).slice(0, 3);
 
-    let fallback = null;
     for (let i = 0; i < candidates.length; i++) {
         const post = await fetchPost(candidates[i].url);
         log('post "' + post.title + '" (' + (post.year || '?') + ') items=' + post.items.length);
         if (!post.items.length) continue;
-        if (!fallback) fallback = post;
-        if (!year || !post.year || Math.abs(post.year - year) <= 1) return post;
-        if (Math.abs(post.year - year) <= 3 && i === candidates.length - 1) return post;
+        const diff = year && post.year ? Math.abs(post.year - year) : 0;
+        const sameTitle = normalize(post.title) === normalize(title);
+        // Same film only: a missing year is fine, small drift is fine when the
+        // title matches exactly, anything else is a different release.
+        if (!year || !post.year || diff <= 1 || (sameTitle && diff <= 3)) return post;
+        log('year ' + post.year + ' is not ' + year + ', trying next candidate');
     }
-    if (fallback) return fallback;
-    throw new Error('no downloadable item on "' + title + '"');
+    throw new Error('no "' + title + '" (' + (year || '?') + ') on 4khdhub');
 }
 
 module.exports = {

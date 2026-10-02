@@ -6,7 +6,7 @@ const outDir = path.join(__dirname, 'providers');
 
 const targets = [
     { src: 'movieboxtv', out: 'movieboxtv.js', global: '__movieboxtv', version: '1.2.1', label: 'MovieBox TV' },
-    { src: '4khdhub', out: '4khdhub.js', global: '__4khdhub', version: '1.0.0', label: '4KHDHub' },
+    { src: '4khdhub', out: '4khdhub.js', global: '__4khdhub', version: '1.0.1', label: '4KHDHub' },
 ];
 
 if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });

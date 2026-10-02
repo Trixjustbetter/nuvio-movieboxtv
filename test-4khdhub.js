@@ -4,21 +4,30 @@ const CASES = [
     { label: 'Movie (Hacksaw Ridge 2016)', args: ['324786', 'movie', null, null] },
     { label: 'TV (Severance S01E01)', args: ['95396', 'tv', 1, 1] },
     { label: 'Movie (Dune Part Two 2024)', args: ['693134', 'movie', null, null] },
+    { label: 'TV (Reacher S01E01 - 4K worker case)', args: ['108978', 'tv', 1, 1] },
+    { label: 'Movie (Goosebumps 2015 - 4K worker case)', args: ['257445', 'movie', null, null] },
 ];
+
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0';
+const SEEK_AT = 1048576;
 
 function isRow(s) {
     return !!(s && s.url) && s.quality !== 'DEBUG';
 }
 
-// Read only the first bytes, then cancel, so a server that ignores Range
-// does not stream a whole 7 GB file into the test.
-async function probe(url) {
+function isGoogleUrl(u) {
+    return /googleusercontent\.com/i.test(String(u || ''));
+}
+
+// One request with an explicit byte range, then cancel: hosts that ignore
+// Range answer the whole file and must not be pulled into the test.
+async function probe(url, range) {
     let res;
     try {
         res = await fetch(url, {
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0',
-                Range: 'bytes=0-31',
+                'User-Agent': UA,
+                Range: range,
                 Referer: 'https://4khdhub.one/',
             },
         });
@@ -43,10 +52,11 @@ async function probe(url) {
 
 function looksLikeVideo(p) {
     if (p.status !== 200 && p.status !== 206) return false;
+    if (/html|json/i.test(p.ct) && !/video/i.test(p.ct)) return false;
     if (p.head.indexOf('1a45dfa3') === 0) return true; // Matroska
     if (p.head.indexOf('000000') === 0 && (p.ct || '').indexOf('mp4') !== -1) return true;
     if ((p.ct || '').indexOf('video') !== -1) return true;
-    if ((p.ct || '').indexOf('octet-stream') !== -1 && !/html/i.test(p.ct)) return true;
+    if ((p.ct || '').indexOf('octet-stream') !== -1) return true;
     return false;
 }
 
@@ -64,21 +74,39 @@ async function run() {
                 continue;
             }
             let good = 0;
+            let seekBad = 0;
             for (let i = 0; i < rows.length; i++) {
                 const s = rows[i];
-                const p = await probe(s.url);
+                // what a player sends when it opens the file
+                const p = await probe(s.url, 'bytes=0-');
                 const ok = looksLikeVideo(p);
                 if (ok) good++;
                 console.log((ok ? '  ok  ' : '  BAD ') + (s.quality || '?') + ' | ' + s.title);
-                console.log('        HTTP ' + p.status + ' ct=' + p.ct + ' head=' + p.head +
+                console.log('        open  HTTP ' + p.status + ' ct=' + p.ct + ' head=' + p.head +
                     (p.err ? ' err=' + p.err : ''));
-                console.log('        ' + s.url.slice(0, 110) + (s.url.length > 110 ? '...' : ''));
+                if (!ok) continue;
+
+                if (isGoogleUrl(s.url)) {
+                    // Google download links ignore Range: plays, but no seeking
+                    console.log('        seek  skipped (host ignores Range)');
+                    continue;
+                }
+                const q = await probe(s.url, 'bytes=' + SEEK_AT + '-' + (SEEK_AT + 63));
+                const seeks = q.status === 206;
+                if (!seeks) seekBad++;
+                console.log((seeks ? '        seek  206 ok' : '        seek  BAD HTTP ' + q.status));
             }
             if (!good) {
                 console.error('FAIL: no stream served video bytes');
                 failed++;
+            } else if (good !== rows.length) {
+                console.error('FAIL: ' + (rows.length - good) + ' stream(s) would not open in a player');
+                failed++;
+            } else if (seekBad) {
+                console.error('FAIL: ' + seekBad + ' stream(s) cannot be seeked');
+                failed++;
             } else {
-                console.log('OK: ' + good + '/' + rows.length + ' stream(s) playable');
+                console.log('OK: ' + good + '/' + rows.length + ' stream(s) openable');
             }
         } catch (e) {
             console.error('FAIL:', e && e.message ? e.message : e);

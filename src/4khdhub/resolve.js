@@ -109,45 +109,55 @@ function extractLinkParam(url) {
     return /^https?:\/\//i.test(v) ? v : null;
 }
 
-// Candidate file urls in reliability order: signed R2, link-generator
-// payloads, explicit file extensions, then cloudflare-worker blobs.
+// Candidate file urls in the order a player prefers them: hosts that honour
+// HTTP Range (signed R2, CDN files) so seeking works, then link-generator
+// payloads (Google download links play but ignore Range). Cloudflare-worker
+// blobs are dropped: they answer the open-ended Range a player sends with a
+// JSON 403 and rate-limit every other shape, so a row built on one is a row
+// that fails to open.
 function directCandidates(anchors, finalUrl) {
     const all = (anchors || []).concat(finalUrl ? [finalUrl] : []);
     const r2 = [];
     const link = [];
     const ext = [];
-    const worker = [];
     const seen = {};
     for (let i = 0; i < all.length; i++) {
         const u = all[i];
         if (!u || seen[u]) continue;
         seen[u] = true;
+        if (/workers\.dev/i.test(u)) continue;
         if (/r2\.cloudflarestorage\.com/.test(u)) { r2.push(u); continue; }
         const lp = extractLinkParam(u);
         if (lp && !/gpdl\./.test(lp)) { link.push(lp); continue; }
         if (/\.(mkv|mp4|m4v|avi)(\?|$)/i.test(u) && !/gpdl\./.test(u)) { ext.push(u); continue; }
-        if (/workers\.dev\/[0-9a-f]{32,}(\?|$)/i.test(u)) worker.push(u);
     }
-    return r2.concat(link, ext, worker);
+    return r2.concat(ext, link);
 }
 
-function pickDirectUrl(anchors, finalUrl) {
-    const list = directCandidates(anchors, finalUrl);
-    return list.length ? list[0] : null;
+// Google download links ignore Range, so a ranged GET would pull the whole
+// file; a HEAD is enough to tell a live link from an expired one.
+function isGoogleFile(url) {
+    return /googleusercontent\.com/i.test(String(url || ''));
 }
 
-// Worker blobs sometimes answer 403 (expired bucket). Check one cheap
-// ranged read before offering the row; anything else is taken on trust.
+// Ask for the file the way a player does (open-ended Range) and decide on
+// the status only. Worker blobs answer 403 to that request while serving
+// bounded ranges, so a bounded probe would return a row the player cannot
+// open; signed R2 links can expire or rate-limit too, which a status check
+// catches before the row is offered.
 async function looksPlayable(url) {
     if (typeof fetch !== 'function') return true;
+    const google = isGoogleFile(url);
     let res;
     try {
-        res = await fetch(url, { headers: { 'User-Agent': UA, Range: 'bytes=0-63', Referer: REFERER } });
+        res = google
+            ? await fetch(url, { method: 'HEAD', headers: { 'User-Agent': UA, Referer: REFERER } })
+            : await fetch(url, { headers: { 'User-Agent': UA, Range: 'bytes=0-', Referer: REFERER } });
     } catch (e) {
         return false;
     }
     const status = statusOf(res);
-    if (status >= 400) return false;
+    if (status < 200 || status >= 400) return false;
     let ct = '';
     try {
         if (res && res.headers && typeof res.headers.get === 'function') {
@@ -155,32 +165,29 @@ async function looksPlayable(url) {
         }
     } catch (e) { /* headers may be absent */ }
     if (ct && /(json|text\/html)/i.test(ct)) return false;
+    if (google) return true;
     try {
-        if (res.body && typeof res.body.getReader === 'function') {
-            const reader = res.body.getReader();
-            const chunk = await reader.read();
-            try { await reader.cancel(); } catch (e) { /* noop */ }
-            const v = chunk && chunk.value;
-            if (v && v.length >= 4) {
-                const ebml = v[0] === 0x1a && v[1] === 0x45 && v[2] === 0xdf && v[3] === 0xa3;
-                const mp4 = v[4] === 0x66 && v[5] === 0x74 && v[6] === 0x79 && v[7] === 0x70;
-                const ctOk = /video|octet-stream|matroska/i.test(ct);
-                if (!ebml && !mp4 && !ctOk) return false;
+        if (res.body) {
+            if (typeof res.body.cancel === 'function') {
+                const p = res.body.cancel();
+                if (p && typeof p.catch === 'function') p.catch(function () { /* noop */ });
+            } else if (typeof res.body.getReader === 'function') {
+                const rd = res.body.getReader();
+                const c = rd.cancel();
+                if (c && typeof c.catch === 'function') c.catch(function () { /* noop */ });
             }
         }
-    } catch (e) { /* optimistically accept */ }
+    } catch (e) { /* ignore */ }
     return true;
 }
 
 async function firstPlayable(candidates) {
     for (let i = 0; i < candidates.length; i++) {
         const c = candidates[i];
-        if (/workers\.dev/.test(c)) {
-            const ok = await looksPlayable(c);
-            if (!ok) {
-                console.log('[4KHDHub] skipping dead worker blob');
-                continue;
-            }
+        const ok = await looksPlayable(c);
+        if (!ok) {
+            console.log('[4KHDHub] skipping unplayable link');
+            continue;
         }
         return c;
     }
@@ -230,7 +237,7 @@ function isHubdriveFile(url) {
 async function resolveDrivePage(url) {
     const page = await getHtml(url, 'https://4khdhub.one/');
     const anchors = collectAnchors(page.text);
-    const selfDirect = pickDirectUrl(anchors, page.url);
+    const selfDirect = await firstPlayable(directCandidates(anchors, page.url));
     if (selfDirect && selfDirect !== page.url) return selfDirect;
 
     const api = decodeApiUrl(page.text);
@@ -254,10 +261,15 @@ function originOf(url) {
 async function resolveTarget(target, hops) {
     if (!target) throw new Error('empty target');
     if (hops > 4) throw new Error('too many hops for ' + shortUrl(target));
-    if (/\.(mkv|mp4|m4v|avi)(\?|$)/i.test(target) && !/gpdl\./.test(target)) return target;
+    // A decoded payload may already be the file itself; only hand it over
+    // once it answers the same open-ended Range request a player sends.
+    if (/\.(mkv|mp4|m4v|avi)(\?|$)/i.test(target) && !/gpdl\./.test(target) && !/workers\.dev/i.test(target)) {
+        if (await looksPlayable(target)) return target;
+        console.log('[4KHDHub] skipping unplayable file link');
+    }
 
     const page = await getHtml(target, 'https://4khdhub.one/');
-    const direct = pickDirectUrl(collectAnchors(page.text), page.url);
+    const direct = await firstPlayable(directCandidates(collectAnchors(page.text), page.url));
     if (direct && /\.cloudflarestorage\.com/.test(direct)) return direct;
 
     if (isHubdriveFile(target)) {
@@ -283,7 +295,7 @@ async function resolveShortLink(shortLink) {
     const page = await getHtml(shortLink, 'https://4khdhub.one/');
     const target = decodeShortLink(page.text);
     if (!target) {
-        const direct = pickDirectUrl(collectAnchors(page.text), page.url);
+        const direct = await firstPlayable(directCandidates(collectAnchors(page.text), page.url));
         if (direct) return direct;
         throw new Error('no payload in ' + shortUrl(shortLink));
     }

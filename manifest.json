@@ -2,7 +2,7 @@
   "id": "movieboxtv-repo",
   "name": "MovieBox TV",
   "description": "MovieBox TV streaming provider plus 4KHDHub downloads for Nuvio",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "author": "brody",
   "scrapers": [
     {
@@ -20,7 +20,7 @@
       "id": "4khdhub",
       "name": "4KHDHub",
       "description": "Direct MKV/MP4 downloads for movies and series from 4khdhub.one",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "supportedTypes": ["movie", "tv"],
       "filename": "providers/4khdhub.js",
       "enabled": true,
